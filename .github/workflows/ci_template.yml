@@ -25,7 +25,7 @@ on:
         type: boolean
         default: true
     secrets:
-      GITHUB_TOKEN:
+      GITHUBTOKEN:
         required: true
       SONAR_TOKEN:
         required: false
@@ -122,7 +122,7 @@ jobs:
         # Pin this to a stable version string in your org
         uses: SonarSource/sonarcloud-github-action@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUBTOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         with:
           args: >
