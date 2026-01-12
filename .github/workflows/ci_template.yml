@@ -14,7 +14,8 @@ on:
         required: true
       SNYK_TOKEN:
         required: true
-
+  workflow_dispatch:
+    
 jobs:
   # JOB 1: Security & Compliance
   compliance:
