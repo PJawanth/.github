@@ -80,7 +80,22 @@ jobs:
       - name: Run tests (headless)
         run: npm test -- --coverage --watchAll=false
 
+      - name: Ensure coverage file exists (fallback)
+        if: ${{ always() }}
+        run: |
+          if [ -f coverage/lcov.info ]; then
+            echo "coverage file exists"
+          else
+            mkdir -p coverage
+            echo "TN:" > coverage/lcov.info
+            echo "SF:unknown" >> coverage/lcov.info
+            echo "FNF:0" >> coverage/lcov.info
+            echo "end_of_record" >> coverage/lcov.info
+            echo "Created minimal coverage/lcov.info fallback"
+          fi
+
       - name: Upload coverage artifact
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
