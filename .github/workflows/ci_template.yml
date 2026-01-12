@@ -1,93 +1,79 @@
-name: "🏗️ Enterprise CI Template"
+name: "🚀 Enterprise CI Template"
 
 on:
   workflow_call:
     inputs:
-      node-version:
-        type: string
-        default: "20"
       runner:
+        description: "The type of runner to use"
         type: string
         default: "ubuntu-latest"
+        required: false
+      node-version:
+        description: "Node version for the build"
+        type: string
+        default: "20.x"
+        required: false
     secrets:
       SONAR_TOKEN:
         required: true
       SNYK_TOKEN:
         required: true
-  workflow_dispatch:
-    
+
 jobs:
-  # JOB 1: Security & Compliance
+  # PHASE 1: COMPLIANCE
   compliance:
-    name: "🛡️ Security Scan"
+    name: "🛡️ Security & SCA"
     runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Run Snyk Security Scan
+      - name: Run Snyk Scan
         uses: snyk/actions/node@master
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          args: --severity-threshold=high
 
-  # JOB 2: Unit Testing (Parallel to Security)
+  # PHASE 2: TESTING (Runs in parallel with Compliance)
   unit-tests:
     name: "🧪 Unit Tests"
     runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
-          cache: 'npm'
-          
+          cache: 'npm' # Professional caching for faster builds
+
       - name: Install & Test
         run: |
           npm ci
           npm test -- --coverage --watchAll=false
-          
-      - name: Upload Coverage
+
+      - name: Upload Coverage Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: lcov-report
+          name: code-coverage
           path: coverage/lcov.info
 
-  # JOB 3: Code Quality (Depends on Tests for Coverage Data)
-  quality-gate:
+  # PHASE 3: QUALITY GATE (Needs Tests to finish)
+  sonarcloud:
     name: "📊 SonarCloud Analysis"
     needs: [unit-tests, compliance]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          
+          fetch-depth: 0 
       - name: Download Coverage
         uses: actions/download-artifact@v4
         with:
-          name: lcov-report
+          name: code-coverage
           path: coverage/
-
       - name: SonarCloud Scan
         uses: SonarSource/sonarcloud-github-action@master
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUBTOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         with:
           args: >
             -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
             -Dsonar.qualitygate.wait=true
-
-  # JOB 4: Build Artifact (Only runs if all quality gates pass)
-  build:
-    name: "📦 Build & Package"
-    needs: quality-gate
-    runs-on: ${{ inputs.runner }}
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build Production Bundle
-        run: |
-          npm ci
-          npm run build
