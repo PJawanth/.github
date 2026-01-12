@@ -1,0 +1,92 @@
+name: "🏗️ Enterprise CI Template"
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        type: string
+        default: "20"
+      runner:
+        type: string
+        default: "ubuntu-latest"
+    secrets:
+      SONAR_TOKEN:
+        required: true
+      SNYK_TOKEN:
+        required: true
+
+jobs:
+  # JOB 1: Security & Compliance
+  compliance:
+    name: "🛡️ Security Scan"
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run Snyk Security Scan
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high
+
+  # JOB 2: Unit Testing (Parallel to Security)
+  unit-tests:
+    name: "🧪 Unit Tests"
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+          
+      - name: Install & Test
+        run: |
+          npm ci
+          npm test -- --coverage --watchAll=false
+          
+      - name: Upload Coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov-report
+          path: coverage/lcov.info
+
+  # JOB 3: Code Quality (Depends on Tests for Coverage Data)
+  quality-gate:
+    name: "📊 SonarCloud Analysis"
+    needs: [unit-tests, compliance]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: Download Coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: lcov-report
+          path: coverage/
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUBTOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+            -Dsonar.qualitygate.wait=true
+
+  # JOB 4: Build Artifact (Only runs if all quality gates pass)
+  build:
+    name: "📦 Build & Package"
+    needs: quality-gate
+    runs-on: ${{ inputs.runner }}
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Production Bundle
+        run: |
+          npm ci
+          npm run build
