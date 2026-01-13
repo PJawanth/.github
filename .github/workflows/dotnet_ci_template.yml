@@ -1,6 +1,7 @@
 name: .NET CI Template
 
 on:
+  workflow_dispatch: 
   workflow_call:
     inputs:
       run_tests:
