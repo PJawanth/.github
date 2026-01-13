@@ -7,6 +7,7 @@ name: "🚀 Enterprise CI Template"
 # evaluation pitfalls when callers pass empty strings.
 
 on:
+  workflow_dispatch: 
   workflow_call:
     inputs:
       node-version:
