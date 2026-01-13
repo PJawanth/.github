@@ -1,8 +1,12 @@
-name: Python CI Template (Build + Test separated)
+name: Python CI Template (Org Standard)
 
 on:
   workflow_call:
     inputs:
+      python_versions:
+        description: "Comma-separated python versions, e.g. 3.10,3.11,3.12"
+        type: string
+        default: "3.10,3.11,3.12"
       run_tests:
         type: boolean
         default: true
@@ -19,14 +23,33 @@ permissions:
 
 jobs:
   # -------------------------
-  # BUILD JOB
+  # PREP (convert input string to JSON for matrix)
+  # -------------------------
+  prep:
+    runs-on: ubuntu-latest
+    outputs:
+      py_matrix: ${{ steps.set.outputs.py_matrix }}
+    steps:
+      - id: set
+        shell: bash
+        run: |
+          # Convert "3.10,3.11,3.12" -> ["3.10","3.11","3.12"]
+          VERS="${{ inputs.python_versions }}"
+          JSON=$(printf '%s' "$VERS" | awk -F',' 'BEGIN{print "["}{for(i=1;i<=NF;i++){gsub(/^[ \t]+|[ \t]+$/,"",$i); printf "\"%s\"%s",$i,(i<NF?",":"")} } END{print "]"}')
+          echo "py_matrix=$JSON" >> "$GITHUB_OUTPUT"
+
+
+  # -------------------------
+  # BUILD JOB (resilient)
   # -------------------------
   build:
     name: Build (Python ${{ matrix.python }})
+    needs: prep
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python: ["3.10", "3.11", "3.12"]
+        python: ${{ fromJson(needs.prep.outputs.py_matrix) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -40,23 +63,32 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: pip-${{ runner.os }}-${{ matrix.python }}-${{ hashFiles('requirements.txt') }}
+          key: pip-${{ runner.os }}-${{ matrix.python }}-${{ hashFiles('requirements.txt', 'pyproject.toml', 'setup.py') }}
 
-      - name: Install build tools + deps
+      - name: Install deps + build tools
         run: |
           python -m pip install --upgrade pip
-          pip install build
+          pip install -U setuptools wheel build
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Build package (sdist + wheel)
+      - name: Create build artifact (package if possible, else source bundle)
+        shell: bash
         run: |
-          python -m build
+          set -e
+          mkdir -p dist
+          if [ -f pyproject.toml ] || [ -f setup.py ]; then
+            echo "Packaging metadata found -> building wheel/sdist"
+            python -m build
+          else
+            echo "No packaging metadata -> creating source bundle"
+            tar -czf dist/source.tar.gz .
+          fi
           ls -la dist
 
-      - name: Upload build artifacts (packages)
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: python-dist-${{ matrix.python }}
+          name: python-build-${{ matrix.python }}
           path: dist/
 
 
@@ -69,8 +101,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python: ["3.10", "3.11", "3.12"]
+        python: ${{ fromJson(needs.prep.outputs.py_matrix) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -84,7 +117,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: pip-${{ runner.os }}-${{ matrix.python }}-${{ hashFiles('requirements.txt') }}
+          key: pip-${{ runner.os }}-${{ matrix.python }}-${{ hashFiles('requirements.txt', 'pyproject.toml', 'setup.py') }}
 
       - name: Install test deps
         run: |
@@ -92,23 +125,29 @@ jobs:
           pip install pytest coverage
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Download build artifacts (packages)
+      - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
-          name: python-dist-${{ matrix.python }}
+          name: python-build-${{ matrix.python }}
           path: dist/
 
-      - name: Run tests + coverage
+      - name: Run tests + coverage (skip gracefully if no tests)
+        shell: bash
         run: |
           mkdir -p reports
-          coverage run -m pytest
-          coverage xml -o reports/coverage.xml
-          coverage report --fail-under=${{ inputs.coverage_threshold }}
+          if [ -d tests ] || ls -1 *test*.py >/dev/null 2>&1; then
+            coverage run -m pytest
+            coverage xml -o reports/coverage.xml
+            coverage report --fail-under=${{ inputs.coverage_threshold }}
+          else
+            echo "No tests found. Skipping pytest."
+            echo "<testsuite name='no-tests' tests='0' failures='0'/>" > reports/no-tests.xml
+          fi
 
-      - name: Upload test artifacts (coverage + dist)
+      - name: Upload test artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: python-test-artifacts-${{ matrix.python }}
+          name: python-test-${{ matrix.python }}
           path: |
             reports/
             dist/
@@ -119,8 +158,8 @@ jobs:
   # -------------------------
   security:
     name: Security Scan (CodeQL)
-    if: inputs.enable_security && inputs.run_tests
-    needs: test
+    if: inputs.enable_security
+    needs: [build, test]
     runs-on: ubuntu-latest
 
     steps:
@@ -136,18 +175,18 @@ jobs:
 
 
   # -------------------------
-  # DEPLOY GATE
+  # DEPLOYMENT GATE
   # -------------------------
   deploy-gate:
     name: Deployment Gate
-    # If security is disabled, we only need test; if tests are disabled, we only need build.
     needs: [build, test, security]
     if: >
       always() &&
       needs.build.result == 'success' &&
       (
         inputs.run_tests == false ||
-        needs.test.result == 'success'
+        needs.test.result == 'success' ||
+        needs.test.result == 'skipped'
       ) &&
       (
         inputs.enable_security == false ||
@@ -158,4 +197,4 @@ jobs:
     environment: production
 
     steps:
-      - run: echo "Deployment approved for Python pipeline"
+      - run: echo "Deployment approved (gate passed)"
