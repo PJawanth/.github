@@ -1,21 +1,26 @@
-name: .NET CI Template
+name: .NET CI Template (Build + Test separated)
 
 on:
-  workflow_dispatch: 
   workflow_call:
     inputs:
-      run_tests:
-        type: boolean
-        default: true
       enable_security:
         type: boolean
         default: true
 
-jobs:
+permissions:
+  contents: read
+  security-events: write
 
-  build-test:
-    name: Build and Test (.NET)
+jobs:
+  # -------------------------
+  # BUILD JOB
+  # -------------------------
+  build:
+    name: Build (.NET ${{ matrix.dotnet }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dotnet: ["8.0.x"]   # Add "7.0.x" if you truly support it
 
     steps:
       - uses: actions/checkout@v4
@@ -23,48 +28,119 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "8.0.x"
+          dotnet-version: ${{ matrix.dotnet }}
+
+      - name: Cache NuGet
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ matrix.dotnet }}-${{ hashFiles('**/*.csproj') }}
 
       - name: Restore
         run: dotnet restore
 
-      - name: Build
-        run: dotnet build --configuration Release --no-restore
+      - name: Build (Release)
+        run: dotnet build --no-restore --configuration Release
 
-      - name: Test
-        if: inputs.run_tests
+      # Upload compiled outputs so test can run --no-build reliably
+      - name: Collect build outputs
         run: |
-          dotnet test \
+          mkdir -p build_artifacts
+          find . -type d -path "*bin/Release*" -o -path "*obj/Release*" | head -n 5
+          tar -czf build_artifacts/build_outputs.tar.gz **/bin/Release/** **/obj/Release/** || true
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-build-${{ matrix.dotnet }}
+          path: build_artifacts/build_outputs.tar.gz
+
+
+  # -------------------------
+  # TEST JOB
+  # -------------------------
+  test:
+    name: Test (.NET ${{ matrix.dotnet }})
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dotnet: ["8.0.x"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.dotnet }}
+
+      - name: Cache NuGet
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ matrix.dotnet }}-${{ hashFiles('**/*.csproj') }}
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dotnet-build-${{ matrix.dotnet }}
+          path: build_artifacts/
+
+      - name: Restore build outputs into workspace
+        run: |
+          tar -xzf build_artifacts/build_outputs.tar.gz || true
+
+      - name: Run tests (no build)
+        run: |
+          mkdir -p TestResults
+          dotnet test --no-build --configuration Release \
             --logger "trx;LogFileName=test-results.trx" \
             --results-directory TestResults
 
       - name: Upload test artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dotnet-test-results
+          name: dotnet-test-results-${{ matrix.dotnet }}
           path: TestResults/
 
+
+  # -------------------------
+  # SECURITY JOB (CodeQL)
+  # -------------------------
   security:
-    name: Security Scan
+    name: Security Scan (CodeQL)
     if: inputs.enable_security
-    needs: build-test
+    needs: test
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run CodeQL
+      - name: CodeQL Init
         uses: github/codeql-action/init@v3
         with:
           languages: csharp
 
-      - uses: github/codeql-action/analyze@v3
+      - name: CodeQL Autobuild
+        uses: github/codeql-action/autobuild@v3
 
+      - name: CodeQL Analyze
+        uses: github/codeql-action/analyze@v3
+
+
+  # -------------------------
+  # DEPLOY GATE
+  # -------------------------
   deploy-gate:
     name: Deployment Gate
-    needs: security
+    needs: [test, security]
+    if: >
+      always() &&
+      needs.test.result == 'success' &&
+      (needs.security.result == 'success' || needs.security.result == 'skipped')
     runs-on: ubuntu-latest
     environment: production
 
     steps:
-      - run: echo "Approved for deployment (.NET)"
+      - run: echo "Deployment approved for .NET pipeline"
