@@ -3,6 +3,9 @@ name: Python CI Template (Build + Test separated)
 on:
   workflow_call:
     inputs:
+      run_tests:
+        type: boolean
+        default: true
       enable_security:
         type: boolean
         default: true
@@ -62,6 +65,7 @@ jobs:
   # -------------------------
   test:
     name: Test (Python ${{ matrix.python }})
+    if: inputs.run_tests
     needs: build
     runs-on: ubuntu-latest
     strategy:
@@ -88,18 +92,18 @@ jobs:
           pip install pytest coverage
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
+      - name: Download build artifacts (packages)
+        uses: actions/download-artifact@v4
+        with:
+          name: python-dist-${{ matrix.python }}
+          path: dist/
+
       - name: Run tests + coverage
         run: |
           mkdir -p reports
           coverage run -m pytest
           coverage xml -o reports/coverage.xml
           coverage report --fail-under=${{ inputs.coverage_threshold }}
-
-      - name: Download build artifacts (packages)
-        uses: actions/download-artifact@v4
-        with:
-          name: python-dist-${{ matrix.python }}
-          path: dist/
 
       - name: Upload test artifacts (coverage + dist)
         uses: actions/upload-artifact@v4
@@ -115,7 +119,7 @@ jobs:
   # -------------------------
   security:
     name: Security Scan (CodeQL)
-    if: inputs.enable_security
+    if: inputs.enable_security && inputs.run_tests
     needs: test
     runs-on: ubuntu-latest
 
@@ -136,11 +140,20 @@ jobs:
   # -------------------------
   deploy-gate:
     name: Deployment Gate
-    needs: [test, security]
+    # If security is disabled, we only need test; if tests are disabled, we only need build.
+    needs: [build, test, security]
     if: >
       always() &&
-      needs.test.result == 'success' &&
-      (needs.security.result == 'success' || needs.security.result == 'skipped')
+      needs.build.result == 'success' &&
+      (
+        inputs.run_tests == false ||
+        needs.test.result == 'success'
+      ) &&
+      (
+        inputs.enable_security == false ||
+        needs.security.result == 'success' ||
+        needs.security.result == 'skipped'
+      )
     runs-on: ubuntu-latest
     environment: production
 
