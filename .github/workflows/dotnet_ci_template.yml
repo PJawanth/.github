@@ -1,0 +1,69 @@
+name: .NET CI Template
+
+on:
+  workflow_call:
+    inputs:
+      run_tests:
+        type: boolean
+        default: true
+      enable_security:
+        type: boolean
+        default: true
+
+jobs:
+
+  build-test:
+    name: Build and Test (.NET)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Test
+        if: inputs.run_tests
+        run: |
+          dotnet test \
+            --logger "trx;LogFileName=test-results.trx" \
+            --results-directory TestResults
+
+      - name: Upload test artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-test-results
+          path: TestResults/
+
+  security:
+    name: Security Scan
+    if: inputs.enable_security
+    needs: build-test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: csharp
+
+      - uses: github/codeql-action/analyze@v3
+
+  deploy-gate:
+    name: Deployment Gate
+    needs: security
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - run: echo "Approved for deployment (.NET)"
