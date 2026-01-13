@@ -9,7 +9,63 @@ on:
         default: "3.10,3.11,3.12"
       run_tests:
         type: boolean
-        default: true
+        default: true        # ...existing code...
+        
+        jobs:
+          prep:
+            name: prep
+            runs-on: ubuntu-latest
+            outputs:
+              python-versions: ${{ steps.compute.outputs.python-versions }}
+            steps:
+              - name: Compute python matrix
+                id: compute
+                shell: bash
+                run: |
+                  # Accept input from workflow input/var; fall back to defaults
+                  INPUT="${{ inputs.python_versions || vars.PYTHON_VERSIONS || '3.10,3.11,3.12' }}"
+        
+                  # If already an array, normalize quotes to double; else build JSON array
+                  if [[ "$INPUT" =~ ^\[.*\]$ ]]; then
+                    JSON="${INPUT//\'/\"}"
+                  else
+                    # Split on comma or space
+                    IFS=', ' read -r -a arr <<< "$INPUT"
+                    JSON="["
+                    sep=""
+                    for v in "${arr[@]}"; do
+                      [[ -z "$v" ]] && continue
+                      JSON="${JSON}${sep}\"$v\""
+                      sep=","
+                    done
+                    JSON="${JSON}]"
+                  fi
+        
+                  echo "python-versions=$JSON" >> "$GITHUB_OUTPUT"
+        
+          build:
+            name: Build (Python ${{ matrix.python-version }})
+            needs: prep
+            runs-on: ubuntu-latest
+            strategy:
+              matrix:
+                python-version: ${{ fromJson(needs.prep.outputs.python-versions) }}
+            steps:
+              # ...existing code...
+        
+          test:
+            name: Test (Python ${{ matrix.python-version }})
+            needs: prep
+            runs-on: ubuntu-latest
+            strategy:
+              matrix:
+                python-version: ${{ fromJson(needs.prep.outputs.python-versions) }}
+            steps:
+              # ...existing code...
+        
+          # If you have other jobs (e.g., CodeQL, Deployment Gate), keep them as-is
+          # and ensure they depend on build/test as needed.
+        # ...existing code...
       enable_security:
         type: boolean
         default: true
