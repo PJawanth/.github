@@ -1,10 +1,10 @@
-name: Python CI Template (Org Standard)
+name: Python CI Template (Org Standard - DEBUG)
 
 on:
   workflow_call:
     inputs:
       python_versions:
-        description: "Comma-separated python versions, e.g. 3.10,3.11,3.12"
+        description: 'Comma-separated or JSON array. Example: 3.10,3.11,3.12 OR ["3.10","3.11"]'
         type: string
         default: "3.10,3.11,3.12"
       run_tests:
@@ -16,6 +16,9 @@ on:
       coverage_threshold:
         type: number
         default: 80
+      debug:
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -23,31 +26,55 @@ permissions:
 
 jobs:
   # -------------------------
-  # PREP (convert input string to JSON for matrix)
+  # PREP (robust input -> JSON array)
   # -------------------------
   prep:
     runs-on: ubuntu-latest
     outputs:
       py_matrix: ${{ steps.set.outputs.py_matrix }}
+
     steps:
+      - name: Setup Python (for prep)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Debug - show raw input
+        if: ${{ inputs.debug }}
+        run: echo "Raw python_versions input - ${{ inputs.python_versions }}"
+
       - id: set
+        name: Generate matrix JSON (safe)
         shell: bash
+        env:
+          VERS: ${{ inputs.python_versions }}
         run: |
-          # Normalize python versions to valid JSON array for matrix
-          # Accept formats like: 3.10,3.11,3.12 OR ["3.10","3.11"] OR ['3.10','3.11']
-          VERS="${{ inputs.python_versions }}"
-          if [[ "$VERS" =~ ^\[.*\]$ ]]; then
-            # Replace any single quotes with double quotes
-            JSON="${VERS//\'/\"}"
-          else
-            # Convert comma/space separated list to JSON array
-            JSON=$(printf '%s' "$VERS" | awk -F',' 'BEGIN{print "["}{for(i=1;i<=NF;i++){gsub(/^[ \t]+|[ \t]+$/,"",$i); printf "\"%s\"%s",$i,(i<NF?",":"")} } END{print "]"}')
-          fi
+          set -euo pipefail
+          # Use Python to safely parse/normalize the versions input
+          JSON=$(python3 -c "
+          import os, json, sys
+          s = os.environ.get('VERS', '').strip()
+          if not s:
+              sys.exit('python_versions input is empty')
+          if s.startswith('[') and s.endswith(']'):
+              s = s.replace(chr(39), chr(34))
+              arr = json.loads(s)
+          else:
+              arr = [x.strip() for x in s.split(',') if x.strip()]
+          if not isinstance(arr, list) or not arr:
+              sys.exit('Invalid python_versions: ' + repr(s))
+          print(json.dumps(arr))
+          ")
           echo "py_matrix=$JSON" >> "$GITHUB_OUTPUT"
+          echo "Generated py_matrix JSON: $JSON"
+
+      - name: Debug - show computed output
+        if: ${{ inputs.debug }}
+        run: echo "prep output py_matrix = ${{ steps.set.outputs.py_matrix }}"
 
 
   # -------------------------
-  # BUILD JOB (resilient)
+  # BUILD JOB (resilient + debug)
   # -------------------------
   build:
     name: Build (Python ${{ matrix.python }})
@@ -61,10 +88,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Debug - repo files
+        if: ${{ inputs.debug }}
+        run: |
+          echo "Repo root contents:"
+          ls -la
+          echo "Detected key files:"
+          test -f requirements.txt && echo " - requirements.txt found" || echo " - requirements.txt NOT found"
+          test -f pyproject.toml && echo " - pyproject.toml found" || echo " - pyproject.toml NOT found"
+          test -f setup.py && echo " - setup.py found" || echo " - setup.py NOT found"
+          test -d tests && echo " - tests/ folder found" || echo " - tests/ folder NOT found"
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+
+      - name: Debug - python and pip versions
+        if: ${{ inputs.debug }}
+        run: |
+          python --version
+          python -m pip --version
 
       - name: Cache pip
         uses: actions/cache@v4
@@ -74,6 +118,7 @@ jobs:
 
       - name: Install deps + build tools
         run: |
+          set -e
           python -m pip install --upgrade pip
           pip install -U setuptools wheel build
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
@@ -81,31 +126,40 @@ jobs:
       - name: Create build artifact (package if possible, else source bundle)
         shell: bash
         run: |
-          set -e
-          mkdir -p dist
+          set -euo pipefail
+          mkdir -p dist debug
           if [ -f pyproject.toml ] || [ -f setup.py ]; then
             echo "Packaging metadata found -> building wheel/sdist"
-            python -m build
+            python -m build 2>&1 | tee debug/build.log
           else
             echo "No packaging metadata -> creating source bundle"
-            tar -czf dist/source.tar.gz .
+            tar -czf dist/source.tar.gz . 2>&1 | tee debug/build.log
           fi
-          ls -la dist
+          echo "dist/ contents:" | tee -a debug/build.log
+          ls -la dist | tee -a debug/build.log
 
       - name: Upload build artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: python-build-${{ matrix.python }}
           path: dist/
 
+      - name: Upload debug logs (build)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-debug-build-${{ matrix.python }}
+          path: debug/
+
 
   # -------------------------
-  # TEST JOB
+  # TEST JOB (separate + debug)
   # -------------------------
   test:
     name: Test (Python ${{ matrix.python }})
-    if: inputs.run_tests
-    needs: build
+    if: ${{ inputs.run_tests }}
+    needs: [prep, build]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -128,6 +182,7 @@ jobs:
 
       - name: Install test deps
         run: |
+          set -e
           python -m pip install --upgrade pip
           pip install pytest coverage
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
@@ -138,20 +193,36 @@ jobs:
           name: python-build-${{ matrix.python }}
           path: dist/
 
-      - name: Run tests + coverage (skip gracefully if no tests)
+      - name: Debug - show downloaded dist
+        if: ${{ inputs.debug }}
+        run: |
+          echo "Downloaded dist contents:"
+          ls -la dist || true
+
+      - name: Run tests + coverage (safe test detection)
         shell: bash
         run: |
-          mkdir -p reports
-          if [ -d tests ] || ls -1 *test*.py >/dev/null 2>&1; then
-            coverage run -m pytest
+          set -euo pipefail
+          mkdir -p reports debug
+          HAS_TESTS="false"
+          if [ -d tests ]; then
+            HAS_TESTS="true"
+          else
+            if find . -maxdepth 2 -type f -name "*test*.py" | grep -q .; then
+              HAS_TESTS="true"
+            fi
+          fi
+          if [ "$HAS_TESTS" = "true" ]; then
+            coverage run -m pytest 2>&1 | tee debug/test.log
             coverage xml -o reports/coverage.xml
             coverage report --fail-under=${{ inputs.coverage_threshold }}
           else
-            echo "No tests found. Skipping pytest."
+            echo "No tests found. Skipping pytest." | tee debug/test.log
             echo "<testsuite name='no-tests' tests='0' failures='0'/>" > reports/no-tests.xml
           fi
 
       - name: Upload test artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: python-test-${{ matrix.python }}
@@ -159,14 +230,21 @@ jobs:
             reports/
             dist/
 
+      - name: Upload debug logs (test)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-debug-test-${{ matrix.python }}
+          path: debug/
+
 
   # -------------------------
   # SECURITY JOB (CodeQL)
   # -------------------------
   security:
     name: Security Scan (CodeQL)
-    if: inputs.enable_security
-    needs: [build, test]
+    if: ${{ inputs.enable_security }}
+    needs: build
     runs-on: ubuntu-latest
 
     steps:
@@ -187,19 +265,11 @@ jobs:
   deploy-gate:
     name: Deployment Gate
     needs: [build, test, security]
-    if: >
+    if: |
       always() &&
       needs.build.result == 'success' &&
-      (
-        inputs.run_tests == false ||
-        needs.test.result == 'success' ||
-        needs.test.result == 'skipped'
-      ) &&
-      (
-        inputs.enable_security == false ||
-        needs.security.result == 'success' ||
-        needs.security.result == 'skipped'
-      )
+      (inputs.run_tests == false || needs.test.result == 'success' || needs.test.result == 'skipped') &&
+      (inputs.enable_security == false || needs.security.result == 'success' || needs.security.result == 'skipped')
     runs-on: ubuntu-latest
     environment: production
 
