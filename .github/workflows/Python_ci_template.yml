@@ -9,63 +9,7 @@ on:
         default: "3.10,3.11,3.12"
       run_tests:
         type: boolean
-        default: true        # ...existing code...
-        
-        jobs:
-          prep:
-            name: prep
-            runs-on: ubuntu-latest
-            outputs:
-              python-versions: ${{ steps.compute.outputs.python-versions }}
-            steps:
-              - name: Compute python matrix
-                id: compute
-                shell: bash
-                run: |
-                  # Accept input from workflow input/var; fall back to defaults
-                  INPUT="${{ inputs.python_versions || vars.PYTHON_VERSIONS || '3.10,3.11,3.12' }}"
-        
-                  # If already an array, normalize quotes to double; else build JSON array
-                  if [[ "$INPUT" =~ ^\[.*\]$ ]]; then
-                    JSON="${INPUT//\'/\"}"
-                  else
-                    # Split on comma or space
-                    IFS=', ' read -r -a arr <<< "$INPUT"
-                    JSON="["
-                    sep=""
-                    for v in "${arr[@]}"; do
-                      [[ -z "$v" ]] && continue
-                      JSON="${JSON}${sep}\"$v\""
-                      sep=","
-                    done
-                    JSON="${JSON}]"
-                  fi
-        
-                  echo "python-versions=$JSON" >> "$GITHUB_OUTPUT"
-        
-          build:
-            name: Build (Python ${{ matrix.python-version }})
-            needs: prep
-            runs-on: ubuntu-latest
-            strategy:
-              matrix:
-                python-version: ${{ fromJson(needs.prep.outputs.python-versions) }}
-            steps:
-              # ...existing code...
-        
-          test:
-            name: Test (Python ${{ matrix.python-version }})
-            needs: prep
-            runs-on: ubuntu-latest
-            strategy:
-              matrix:
-                python-version: ${{ fromJson(needs.prep.outputs.python-versions) }}
-            steps:
-              # ...existing code...
-        
-          # If you have other jobs (e.g., CodeQL, Deployment Gate), keep them as-is
-          # and ensure they depend on build/test as needed.
-        # ...existing code...
+        default: true
       enable_security:
         type: boolean
         default: true
@@ -89,9 +33,16 @@ jobs:
       - id: set
         shell: bash
         run: |
-          # Convert "3.10,3.11,3.12" -> ["3.10","3.11","3.12"]
+          # Normalize python versions to valid JSON array for matrix
+          # Accept formats like: 3.10,3.11,3.12 OR ["3.10","3.11"] OR ['3.10','3.11']
           VERS="${{ inputs.python_versions }}"
-          JSON=$(printf '%s' "$VERS" | awk -F',' 'BEGIN{print "["}{for(i=1;i<=NF;i++){gsub(/^[ \t]+|[ \t]+$/,"",$i); printf "\"%s\"%s",$i,(i<NF?",":"")} } END{print "]"}')
+          if [[ "$VERS" =~ ^\[.*\]$ ]]; then
+            # Replace any single quotes with double quotes
+            JSON="${VERS//\'/\"}"
+          else
+            # Convert comma/space separated list to JSON array
+            JSON=$(printf '%s' "$VERS" | awk -F',' 'BEGIN{print "["}{for(i=1;i<=NF;i++){gsub(/^[ \t]+|[ \t]+$/,"",$i); printf "\"%s\"%s",$i,(i<NF?",":"")} } END{print "]"}')
+          fi
           echo "py_matrix=$JSON" >> "$GITHUB_OUTPUT"
 
 
